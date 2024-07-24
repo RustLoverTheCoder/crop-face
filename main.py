@@ -1,8 +1,13 @@
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Body
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
 import os
 import cv2
 import numpy as np
 import math
-import argparse
+import tempfile
+# import argparse
+from typing import List, Optional
 
 class YOLOv8_face:
     def __init__(self, path, conf_thres=0.2, iou_thres=0.5):
@@ -148,6 +153,8 @@ class YOLOv8_face:
         base_name = os.path.basename(img_path)  # 获取图像文件名
         name, ext = os.path.splitext(base_name)  # 分离文件名和扩展名
         
+        filenames = []  # 用于存储裁剪后的文件名
+        
         for i, box in enumerate(boxes):
             x, y, w, h = box.astype(int)
             
@@ -183,27 +190,81 @@ class YOLOv8_face:
             else:
                 filename = f'images/{name}_cropped_{i}{ext}'
                 cv2.imwrite(filename, cropped_image)
+            
+            filenames.append(filename)  # 添加文件名到列表
+            
+        return filenames
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--imgpath', type=str, default='images/test.jpeg', help="image path")
-    parser.add_argument('--modelpath', type=str, default='models/yolov8n-face.onnx',
-                        help="onnx filepath")
-    parser.add_argument('--confThreshold', default=0.45, type=float, help='class confidence')
-    parser.add_argument('--nmsThreshold', default=0.5, type=float, help='nms iou thresh')
-    parser.add_argument('--width', type=int, default=None, help='width of the cropped image')
-    parser.add_argument('--height', type=int, default=None, help='height of the cropped image')
-    parser.add_argument('--is_rounded', action='store_true', help='whether to crop a rounded square image')
-    args = parser.parse_args()
-    print(cv2.__version__)
+# if __name__ == '__main__':
+#     parser = argparse.ArgumentParser()
+#     parser.add_argument('--imgpath', type=str, default='images/test.jpeg', help="image path")
+#     parser.add_argument('--modelpath', type=str, default='models/yolov8n-face.onnx',
+#                         help="onnx filepath")
+#     parser.add_argument('--confThreshold', default=0.45, type=float, help='class confidence')
+#     parser.add_argument('--nmsThreshold', default=0.5, type=float, help='nms iou thresh')
+#     parser.add_argument('--width', type=int, default=None, help='width of the cropped image')
+#     parser.add_argument('--height', type=int, default=None, help='height of the cropped image')
+#     parser.add_argument('--is_rounded', action='store_true', help='whether to crop a rounded square image')
+#     args = parser.parse_args()
+#     print(cv2.__version__)
 
-    # Initialize YOLOv8_face object detector
-    YOLOv8_face_detector = YOLOv8_face(args.modelpath, conf_thres=args.confThreshold, iou_thres=args.nmsThreshold)
-    srcimg = cv2.imread(args.imgpath)
+#     # Initialize YOLOv8_face object detector
+#     YOLOv8_face_detector = YOLOv8_face(args.modelpath, conf_thres=args.confThreshold, iou_thres=args.nmsThreshold)
+#     srcimg = cv2.imread(args.imgpath)
 
-    # Detect Objects
-    boxes, scores, classids, kpts = YOLOv8_face_detector.detect(srcimg)
+#     # Detect Objects
+#     boxes, scores, classids, kpts = YOLOv8_face_detector.detect(srcimg)
     
-    print("boxes", boxes)
-    # crop detections
-    YOLOv8_face_detector.crop_detections(srcimg, boxes, args.imgpath, args.width, args.height, args.is_rounded)
+#     print("boxes", boxes)
+#     # crop detections
+#     YOLOv8_face_detector.crop_detections(srcimg, boxes, args.imgpath, args.width, args.height, args.is_rounded)
+
+
+
+app = FastAPI()
+
+
+model_path = 'models/yolov8n-face.onnx'
+yolo_face_detector = YOLOv8_face(model_path, 0.45, 0.5)
+
+class CropParams(BaseModel):
+    width: Optional[int] = 100
+    height: Optional[int] = 100
+    is_rounded: Optional[bool] = False
+
+@app.post("/detect/")
+async def detect_faces(file: UploadFile = File(...), width: Optional[int] = Form(100), height: Optional[int] = Form(100), is_rounded: bool = Form(False)):
+    try:
+        # 读取上传的文件
+        img_bytes = await file.read()
+        img_np = np.frombuffer(img_bytes, np.uint8)
+        srcimg = cv2.imdecode(img_np, cv2.IMREAD_COLOR)
+        
+        # 执行检测
+        boxes, scores, classids, kpts = yolo_face_detector.detect(srcimg)
+        
+        os.makedirs('images', exist_ok=True)
+        
+        # 根据参数裁剪检测结果
+        output_files = []
+        filenames = yolo_face_detector.crop_detections(srcimg, boxes, file.filename, width, height, is_rounded)
+        
+        # 生成文件 URL
+        output_files = [{"filename": filename, "url": f"http://127.0.0.1:8000/{filename}"} for filename in filenames]
+        
+        return {"files": output_files}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@app.get("/images/{filename}")
+async def get_image(filename: str):
+    file_path = os.path.join('images', filename)
+    if not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    return FileResponse(file_path, media_type='image/jpeg')
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
