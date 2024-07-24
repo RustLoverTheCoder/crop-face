@@ -1,0 +1,1 @@
+python3 main.py --imgpath path --width 100 --height 100
